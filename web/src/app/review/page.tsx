@@ -1,7 +1,15 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
+
+// Coding deck ID - only this deck has an agent
+const CODING_DECK_ID = 1743361245682;
+
+interface AgentMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
 
 interface Card {
   id: number;
@@ -57,6 +65,14 @@ export default function ReviewPage() {
   const [decks, setDecks] = useState<DeckWithCount[]>([]);
   const [selectedDeckId, setSelectedDeckId] = useState<number | null>(null);
   const [urgentDeckId, setUrgentDeckId] = useState<number | null>(null);
+
+  // Agent chat state (for Coding deck)
+  const [agentMessages, setAgentMessages] = useState<AgentMessage[]>([]);
+  const [sessionId] = useState(() => `session-${Date.now()}`);
+  const [chatInput, setChatInput] = useState('');
+  const [agentLoading, setAgentLoading] = useState(false);
+  const [showChat, setShowChat] = useState(true);
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
   // Fetch decks with due counts
   const fetchDecks = useCallback(async () => {
@@ -118,6 +134,60 @@ export default function ReviewPage() {
 
   const currentCard = reviewState.cards[currentIndex];
 
+  // Check if current deck is the Coding deck (has agent)
+  const hasCodingAgent = selectedDeckId === CODING_DECK_ID || (currentCard && currentCard.did === CODING_DECK_ID);
+
+  // Scroll chat to bottom when new messages arrive
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [agentMessages]);
+
+  // Send message to agent
+  async function sendToAgent(message: string, cardContext?: { front: string; back: string }) {
+    if (!message.trim() || agentLoading) return;
+
+    const deckId = currentCard?.did || selectedDeckId || CODING_DECK_ID;
+
+    setAgentLoading(true);
+    setChatInput('');
+
+    // Add user message immediately
+    setAgentMessages(prev => [...prev, { role: 'user', content: message }]);
+
+    try {
+      const res = await fetch('/api/agent/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, sessionId, deckId, cardContext }),
+      });
+
+      const data = await res.json();
+
+      if (data.message) {
+        setAgentMessages(prev => [...prev, { role: 'assistant', content: data.message }]);
+      }
+    } catch (error) {
+      console.error('Agent chat error:', error);
+      setAgentMessages(prev => [...prev, { role: 'assistant', content: 'Sorry, I had trouble processing that. Try again?' }]);
+    }
+
+    setAgentLoading(false);
+  }
+
+  // Handle chat input submission
+  function handleChatSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!chatInput.trim()) return;
+
+    const fields = currentCard ? parseFields(currentCard.note_flds) : [];
+    const cardContext = currentCard ? {
+      front: fields[0]?.replace(/<[^>]*>/g, '').substring(0, 200) || '',
+      back: fields[1]?.replace(/<[^>]*>/g, '').substring(0, 200) || '',
+    } : undefined;
+
+    sendToAgent(chatInput, cardContext);
+  }
+
   async function handleAction(action: 'repeat' | 'soon' | 'later' | 'complete') {
     if (!currentCard) return;
 
@@ -178,6 +248,12 @@ export default function ReviewPage() {
   // Keyboard shortcuts
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
+      // Ignore keyboard shortcuts when typing in an input or textarea
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+        return;
+      }
+
       if (sessionComplete || loading) return;
 
       if (!showBack) {
@@ -364,9 +440,9 @@ export default function ReviewPage() {
       </header>
 
       {/* Card Area */}
-      <main className="flex-1 flex flex-col items-center justify-center p-8">
+      <main className="flex-1 flex flex-col items-center p-8 overflow-y-auto">
         {/* Deck Bubbles - always visible around the card */}
-        <div className="mb-6 flex flex-wrap justify-center gap-2 max-w-4xl">
+        <div className="mb-4 flex flex-wrap justify-center gap-2 max-w-5xl">
           {decks.map((deck) => {
             const isSelected = deck.id === selectedDeckId || deck.id === currentCard.did;
             const isDeckUrgent = deck.id === urgentDeckId;
@@ -391,95 +467,181 @@ export default function ReviewPage() {
           })}
         </div>
 
-        {/* Card */}
-        <div
-          className={`w-full max-w-3xl bg-gray-800 rounded-2xl shadow-2xl overflow-hidden transition-all duration-300 ${
-            isUrgent ? 'ring-2 ring-amber-500/50' : ''
-          }`}
-        >
-          {/* Front */}
-          <div className="p-8 min-h-[200px]">
-            <div className="text-xs uppercase tracking-wider text-gray-500 mb-4">Front</div>
+        {/* Card + Agent Chat Container */}
+        <div className={`flex gap-4 w-full ${hasCodingAgent && showChat ? 'max-w-6xl' : 'max-w-3xl'}`}>
+          {/* Card Column */}
+          <div className="flex-1 flex flex-col">
+            {/* Card */}
             <div
-              className="text-xl text-white prose prose-invert prose-lg max-w-none"
-              dangerouslySetInnerHTML={{ __html: front }}
-            />
-          </div>
-
-          {/* Back (shown on click/space) */}
-          {showBack && (
-            <>
-              <div className="border-t border-gray-700" />
-              <div className="p-8 bg-gray-800/50 min-h-[150px]">
-                <div className="text-xs uppercase tracking-wider text-gray-500 mb-4">Back</div>
+              className={`w-full bg-gray-800 rounded-2xl shadow-2xl overflow-hidden transition-all duration-300 ${
+                isUrgent ? 'ring-2 ring-amber-500/50' : ''
+              }`}
+            >
+              {/* Front */}
+              <div className="p-8 min-h-[200px]">
+                <div className="text-xs uppercase tracking-wider text-gray-500 mb-4">Front</div>
                 <div
-                  className="text-lg text-gray-200 prose prose-invert max-w-none"
-                  dangerouslySetInnerHTML={{ __html: back || '<em class="text-gray-500">No back content</em>' }}
+                  className="text-xl text-white prose prose-invert prose-lg max-w-none"
+                  dangerouslySetInnerHTML={{ __html: front }}
                 />
               </div>
-            </>
-          )}
 
-          {/* Tags */}
-          {currentCard.note_tags && (
-            <div className="px-8 pb-4">
-              <div className="flex flex-wrap gap-2">
-                {currentCard.note_tags.split(' ').filter(Boolean).map((tag, i) => (
-                  <span key={i} className="px-2 py-0.5 bg-gray-700/50 text-gray-400 rounded text-xs">
-                    {tag}
-                  </span>
-                ))}
+              {/* Back (shown on click/space) */}
+              {showBack && (
+                <>
+                  <div className="border-t border-gray-700" />
+                  <div className="p-8 bg-gray-800/50 min-h-[150px]">
+                    <div className="text-xs uppercase tracking-wider text-gray-500 mb-4">Back</div>
+                    <div
+                      className="text-lg text-gray-200 prose prose-invert max-w-none"
+                      dangerouslySetInnerHTML={{ __html: back || '<em class="text-gray-500">No back content</em>' }}
+                    />
+                  </div>
+                </>
+              )}
+
+              {/* Tags */}
+              {currentCard.note_tags && (
+                <div className="px-8 pb-4">
+                  <div className="flex flex-wrap gap-2">
+                    {currentCard.note_tags.split(' ').filter(Boolean).map((tag, i) => (
+                      <span key={i} className="px-2 py-0.5 bg-gray-700/50 text-gray-400 rounded text-xs">
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Action Area */}
+            <div className="mt-6 w-full">
+              {!showBack ? (
+                <button
+                  onClick={() => setShowBack(true)}
+                  className="w-full py-4 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors text-lg font-medium"
+                >
+                  Show Answer
+                  <span className="ml-2 text-blue-300 text-sm">(Space)</span>
+                </button>
+              ) : (
+                <div className="space-y-4">
+                  {/* Primary Actions - 3 buttons */}
+                  <div className="grid grid-cols-3 gap-4">
+                    <button
+                      onClick={() => handleAction('repeat')}
+                      className="py-4 bg-red-600/80 text-white rounded-xl hover:bg-red-600 transition-colors text-lg font-medium flex flex-col items-center"
+                    >
+                      <span>Repeat</span>
+                      <span className="text-red-300 text-xs mt-1">Again now (1)</span>
+                    </button>
+                    <button
+                      onClick={() => handleAction('soon')}
+                      className="py-4 bg-amber-600/80 text-white rounded-xl hover:bg-amber-600 transition-colors text-lg font-medium flex flex-col items-center"
+                    >
+                      <span>Soon</span>
+                      <span className="text-amber-300 text-xs mt-1">Tomorrow (2)</span>
+                    </button>
+                    <button
+                      onClick={() => handleAction('later')}
+                      className="py-4 bg-green-600/80 text-white rounded-xl hover:bg-green-600 transition-colors text-lg font-medium flex flex-col items-center"
+                    >
+                      <span>Later</span>
+                      <span className="text-green-300 text-xs mt-1">7 days (3)</span>
+                    </button>
+                  </div>
+
+                  {/* Complete/Done Action */}
+                  <button
+                    onClick={() => handleAction('complete')}
+                    className="w-full py-3 bg-gray-700 text-gray-300 rounded-xl hover:bg-gray-600 transition-colors font-medium flex items-center justify-center gap-2"
+                  >
+                    <span>Mark Complete</span>
+                    <span className="text-gray-500 text-sm">(removes from review)</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Agent Chat Panel - only for Coding deck */}
+          {hasCodingAgent && showChat && (
+            <div className="w-80 flex flex-col bg-gray-800 rounded-2xl border border-gray-700 overflow-hidden">
+              {/* Chat Header */}
+              <div className="p-3 bg-gray-800 border-b border-gray-700 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+                  <span className="text-sm font-medium text-gray-200">Pair Programmer</span>
+                </div>
+                <button
+                  onClick={() => setShowChat(false)}
+                  className="text-gray-500 hover:text-gray-300 text-xs"
+                >
+                  Hide
+                </button>
               </div>
+
+              {/* Chat Messages */}
+              <div className="flex-1 overflow-y-auto p-3 space-y-3 min-h-[300px] max-h-[400px]">
+                {agentMessages.length === 0 ? (
+                  <div className="text-center text-gray-500 text-sm py-8">
+                    <p className="mb-2">👋 Hey! I&apos;m your pair programmer.</p>
+                    <p>Ask me anything about this card or coding concepts!</p>
+                  </div>
+                ) : (
+                  agentMessages.map((msg, i) => (
+                    <div
+                      key={i}
+                      className={`text-sm ${
+                        msg.role === 'user'
+                          ? 'bg-blue-600/30 text-blue-100 ml-8'
+                          : 'bg-gray-700/50 text-gray-200 mr-4'
+                      } p-2.5 rounded-lg`}
+                    >
+                      {msg.content}
+                    </div>
+                  ))
+                )}
+                {agentLoading && (
+                  <div className="bg-gray-700/50 text-gray-400 p-2.5 rounded-lg text-sm mr-4 animate-pulse">
+                    Thinking...
+                  </div>
+                )}
+                <div ref={chatEndRef} />
+              </div>
+
+              {/* Chat Input */}
+              <form onSubmit={handleChatSubmit} className="p-3 border-t border-gray-700">
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    placeholder="Ask about this card..."
+                    className="flex-1 px-3 py-2 bg-gray-900 text-gray-100 rounded-lg text-sm placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    disabled={agentLoading}
+                  />
+                  <button
+                    type="submit"
+                    disabled={agentLoading || !chatInput.trim()}
+                    className="px-3 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Send
+                  </button>
+                </div>
+              </form>
             </div>
           )}
-        </div>
 
-        {/* Action Area */}
-        <div className="mt-8 w-full max-w-3xl">
-          {!showBack ? (
+          {/* Show Chat button when hidden */}
+          {hasCodingAgent && !showChat && (
             <button
-              onClick={() => setShowBack(true)}
-              className="w-full py-4 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors text-lg font-medium"
+              onClick={() => setShowChat(true)}
+              className="fixed right-4 bottom-20 px-4 py-2 bg-blue-600 text-white rounded-full shadow-lg hover:bg-blue-700 transition-colors flex items-center gap-2"
             >
-              Show Answer
-              <span className="ml-2 text-blue-300 text-sm">(Space)</span>
+              <span className="w-2 h-2 bg-green-400 rounded-full" />
+              Open Pair Programmer
             </button>
-          ) : (
-            <div className="space-y-4">
-              {/* Primary Actions - 3 buttons */}
-              <div className="grid grid-cols-3 gap-4">
-                <button
-                  onClick={() => handleAction('repeat')}
-                  className="py-4 bg-red-600/80 text-white rounded-xl hover:bg-red-600 transition-colors text-lg font-medium flex flex-col items-center"
-                >
-                  <span>Repeat</span>
-                  <span className="text-red-300 text-xs mt-1">Again now (1)</span>
-                </button>
-                <button
-                  onClick={() => handleAction('soon')}
-                  className="py-4 bg-amber-600/80 text-white rounded-xl hover:bg-amber-600 transition-colors text-lg font-medium flex flex-col items-center"
-                >
-                  <span>Soon</span>
-                  <span className="text-amber-300 text-xs mt-1">Tomorrow (2)</span>
-                </button>
-                <button
-                  onClick={() => handleAction('later')}
-                  className="py-4 bg-green-600/80 text-white rounded-xl hover:bg-green-600 transition-colors text-lg font-medium flex flex-col items-center"
-                >
-                  <span>Later</span>
-                  <span className="text-green-300 text-xs mt-1">7 days (3)</span>
-                </button>
-              </div>
-
-              {/* Complete/Done Action */}
-              <button
-                onClick={() => handleAction('complete')}
-                className="w-full py-3 bg-gray-700 text-gray-300 rounded-xl hover:bg-gray-600 transition-colors font-medium flex items-center justify-center gap-2"
-              >
-                <span>Mark Complete</span>
-                <span className="text-gray-500 text-sm">(removes from review)</span>
-              </button>
-            </div>
           )}
         </div>
       </main>
